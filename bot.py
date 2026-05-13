@@ -75,10 +75,28 @@ def db():
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def init_db():
     conn = db()
     cur = conn.cursor()
+
+    # Check if old database structure exists
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='participants'")
+    participants_table = cur.fetchone()
+
+    if participants_table:
+        cur.execute("PRAGMA table_info(participants)")
+        columns = [row["name"] for row in cur.fetchall()]
+
+        # Old group version used chat_id instead of session_id.
+        # If old structure is found, reset the database safely.
+        if "session_id" not in columns:
+            print("Old database structure detected. Rebuilding database...")
+
+            cur.execute("DROP TABLE IF EXISTS participants")
+            cur.execute("DROP TABLE IF EXISTS sessions")
+            cur.execute("DROP TABLE IF EXISTS pending_names")
+
+            conn.commit()
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS participants (
@@ -108,8 +126,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-
+    
 def session_id():
     return str(CHANNEL_ID)
 
