@@ -613,3 +613,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    #edit .env file and add your bot token, channel id, and optionally admin ids and data directory.
