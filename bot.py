@@ -22,11 +22,48 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "SaberQuranBot").replace("@", "")
+
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1001520548575"))
+
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
 
 DATA_DIR = os.getenv("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_FILE = os.path.join(DATA_DIR, "quran_session.db")
+
+
+# -------------------------
+# Admin helpers
+# -------------------------
+
+def get_admin_ids():
+    if not ADMIN_IDS_RAW:
+        return []
+
+    ids = []
+
+    for item in ADMIN_IDS_RAW.split(","):
+        item = item.strip()
+        if item:
+            try:
+                ids.append(int(item))
+            except ValueError:
+                pass
+
+    return ids
+
+
+def is_admin(user_id):
+    admin_ids = get_admin_ids()
+
+    # If ADMIN_IDS is empty, allow anyone to start/reset.
+    # Later, you can secure it by adding your dad's Telegram ID.
+    if not admin_ids:
+        return True
+
+    return user_id in admin_ids
 
 
 # -------------------------
@@ -45,28 +82,27 @@ def init_db():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS participants (
-        chat_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         name TEXT NOT NULL,
         status TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        PRIMARY KEY (chat_id, user_id)
+        PRIMARY KEY (session_id, user_id)
     )
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS sessions (
-        chat_id TEXT PRIMARY KEY,
+        session_id TEXT PRIMARY KEY,
         panel_message_id INTEGER
     )
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS pending_names (
-        chat_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        prompt_message_id INTEGER,
-        PRIMARY KEY (chat_id, user_id)
+        user_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
     )
     """)
 
@@ -74,68 +110,78 @@ def init_db():
     conn.close()
 
 
-def set_panel_message(chat_id, message_id):
+def session_id():
+    return str(CHANNEL_ID)
+
+
+def set_panel_message(message_id):
     conn = db()
     conn.execute(
-        "INSERT OR REPLACE INTO sessions (chat_id, panel_message_id) VALUES (?, ?)",
-        (str(chat_id), message_id),
+        "INSERT OR REPLACE INTO sessions (session_id, panel_message_id) VALUES (?, ?)",
+        (session_id(), message_id),
     )
     conn.commit()
     conn.close()
 
 
-def get_panel_message(chat_id):
+def get_panel_message():
     conn = db()
     row = conn.execute(
-        "SELECT panel_message_id FROM sessions WHERE chat_id = ?",
-        (str(chat_id),),
+        "SELECT panel_message_id FROM sessions WHERE session_id = ?",
+        (session_id(),),
     ).fetchone()
     conn.close()
+
     return row["panel_message_id"] if row else None
 
 
-def save_pending_name(chat_id, user_id, prompt_message_id):
+def set_pending_name(user_id):
     conn = db()
     conn.execute(
-        "INSERT OR REPLACE INTO pending_names (chat_id, user_id, prompt_message_id) VALUES (?, ?, ?)",
-        (str(chat_id), str(user_id), prompt_message_id),
+        "INSERT OR REPLACE INTO pending_names (user_id, session_id, created_at) VALUES (?, ?, ?)",
+        (
+            str(user_id),
+            session_id(),
+            datetime.now().isoformat(timespec="seconds"),
+        ),
     )
     conn.commit()
     conn.close()
 
 
-def has_pending_name(chat_id, user_id):
+def has_pending_name(user_id):
     conn = db()
     row = conn.execute(
-        "SELECT * FROM pending_names WHERE chat_id = ? AND user_id = ?",
-        (str(chat_id), str(user_id)),
+        "SELECT * FROM pending_names WHERE user_id = ?",
+        (str(user_id),),
     ).fetchone()
     conn.close()
+
     return row is not None
 
 
-def clear_pending_name(chat_id, user_id):
+def clear_pending_name(user_id):
     conn = db()
     conn.execute(
-        "DELETE FROM pending_names WHERE chat_id = ? AND user_id = ?",
-        (str(chat_id), str(user_id)),
+        "DELETE FROM pending_names WHERE user_id = ?",
+        (str(user_id),),
     )
     conn.commit()
     conn.close()
 
 
-def upsert_participant(chat_id, user_id, name, status="waiting"):
+def upsert_participant(user_id, name, status="waiting"):
     conn = db()
     conn.execute("""
-    INSERT INTO participants (chat_id, user_id, name, status, updated_at)
+    INSERT INTO participants (session_id, user_id, name, status, updated_at)
     VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(chat_id, user_id)
+    ON CONFLICT(session_id, user_id)
     DO UPDATE SET
         name = excluded.name,
         status = excluded.status,
         updated_at = excluded.updated_at
     """, (
-        str(chat_id),
+        session_id(),
         str(user_id),
         name.strip(),
         status,
@@ -145,25 +191,25 @@ def upsert_participant(chat_id, user_id, name, status="waiting"):
     conn.close()
 
 
-def update_status(chat_id, user_id, fallback_name, status):
+def update_status(user_id, fallback_name, status):
     conn = db()
 
     existing = conn.execute(
-        "SELECT name FROM participants WHERE chat_id = ? AND user_id = ?",
-        (str(chat_id), str(user_id)),
+        "SELECT name FROM participants WHERE session_id = ? AND user_id = ?",
+        (session_id(), str(user_id)),
     ).fetchone()
 
     name = existing["name"] if existing else fallback_name
 
     conn.execute("""
-    INSERT INTO participants (chat_id, user_id, name, status, updated_at)
+    INSERT INTO participants (session_id, user_id, name, status, updated_at)
     VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(chat_id, user_id)
+    ON CONFLICT(session_id, user_id)
     DO UPDATE SET
         status = excluded.status,
         updated_at = excluded.updated_at
     """, (
-        str(chat_id),
+        session_id(),
         str(user_id),
         name,
         status,
@@ -174,31 +220,32 @@ def update_status(chat_id, user_id, fallback_name, status):
     conn.close()
 
 
-def delete_participant(chat_id, user_id):
+def delete_participant(user_id):
     conn = db()
     conn.execute(
-        "DELETE FROM participants WHERE chat_id = ? AND user_id = ?",
-        (str(chat_id), str(user_id)),
+        "DELETE FROM participants WHERE session_id = ? AND user_id = ?",
+        (session_id(), str(user_id)),
     )
     conn.commit()
     conn.close()
 
 
-def clear_session(chat_id):
+def clear_session():
     conn = db()
-    conn.execute("DELETE FROM participants WHERE chat_id = ?", (str(chat_id),))
-    conn.execute("DELETE FROM pending_names WHERE chat_id = ?", (str(chat_id),))
+    conn.execute("DELETE FROM participants WHERE session_id = ?", (session_id(),))
+    conn.execute("DELETE FROM pending_names")
     conn.commit()
     conn.close()
 
 
-def get_participants(chat_id):
+def get_participants():
     conn = db()
     rows = conn.execute(
-        "SELECT name, status FROM participants WHERE chat_id = ? ORDER BY updated_at ASC",
-        (str(chat_id),),
+        "SELECT name, status FROM participants WHERE session_id = ? ORDER BY updated_at ASC",
+        (session_id(),),
     ).fetchall()
     conn.close()
+
     return rows
 
 
@@ -219,9 +266,11 @@ def status_text(status):
 
 
 def keyboard():
+    add_name_url = f"https://t.me/{BOT_USERNAME}?start=addname"
+
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("➕ أضف اسمي", callback_data="add_name"),
+            InlineKeyboardButton("➕ أضف اسمي", url=add_name_url),
             InlineKeyboardButton("❌ احذف اسمي", callback_data="delete_name"),
         ],
         [
@@ -234,18 +283,19 @@ def keyboard():
     ])
 
 
-def build_panel_text(chat_id):
-    rows = get_participants(chat_id)
+def build_panel_text():
+    rows = get_participants()
 
     text = "📖 *قائمة جلسة القرآن*\n"
     text += "🌿 *السلام عليكم ورحمة الله وبركاته*\n\n"
 
     text += "📌 *طريقة الاستخدام:*\n"
     text += "1️⃣ اضغط ➕ *أضف اسمي* للمشاركة في القراءة.\n"
-    text += "2️⃣ اكتب اسمك الحقيقي كما تحب أن يظهر.\n"
-    text += "3️⃣ بعد الانتهاء من القراءة اضغط ✅ *قرأت بالفعل*.\n"
-    text += "4️⃣ إذا كنت ستستمع فقط اضغط 🎧 *مستمع*.\n"
-    text += "5️⃣ إذا كنت غير حاضر أو معذور اضغط 🌸 *معذور*.\n\n"
+    text += "2️⃣ سيفتح البوت في محادثة خاصة.\n"
+    text += "3️⃣ اكتب اسمك الحقيقي كما تحب أن يظهر.\n"
+    text += "4️⃣ بعد الانتهاء من القراءة اضغط ✅ *قرأت بالفعل*.\n"
+    text += "5️⃣ إذا كنت ستستمع فقط اضغط 🎧 *مستمع*.\n"
+    text += "6️⃣ إذا كنت غير حاضر أو معذور اضغط 🌸 *معذور*.\n\n"
 
     text += "━━━━━━━━━━━━━━\n"
     text += "📋 *القائمة الحالية:*\n\n"
@@ -281,17 +331,17 @@ def telegram_display_name(user):
     return "مشارك بدون اسم"
 
 
-async def refresh_panel(context: ContextTypes.DEFAULT_TYPE, chat_id):
-    message_id = get_panel_message(chat_id)
+async def refresh_panel(context: ContextTypes.DEFAULT_TYPE):
+    message_id = get_panel_message()
 
     if not message_id:
         return
 
     try:
         await context.bot.edit_message_text(
-            chat_id=chat_id,
+            chat_id=CHANNEL_ID,
             message_id=message_id,
-            text=build_panel_text(chat_id),
+            text=build_panel_text(),
             reply_markup=keyboard(),
             parse_mode="Markdown",
         )
@@ -299,15 +349,15 @@ async def refresh_panel(context: ContextTypes.DEFAULT_TYPE, chat_id):
         print("Could not refresh panel:", e)
 
 
-async def pin_panel(context: ContextTypes.DEFAULT_TYPE, chat_id):
-    message_id = get_panel_message(chat_id)
+async def pin_panel(context: ContextTypes.DEFAULT_TYPE):
+    message_id = get_panel_message()
 
     if not message_id:
         return
 
     try:
         await context.bot.pin_chat_message(
-            chat_id=chat_id,
+            chat_id=CHANNEL_ID,
             message_id=message_id,
             disable_notification=True,
         )
@@ -320,50 +370,71 @@ async def pin_panel(context: ContextTypes.DEFAULT_TYPE, chat_id):
 # -------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    args = context.args
+
+    if args and args[0] == "addname":
+        set_pending_name(user.id)
+
+        await update.message.reply_text(
+            "السلام عليكم 🌿\n\n"
+            "اكتب اسمك الحقيقي كما تحب أن يظهر في قائمة جلسة القرآن 👇",
+            reply_markup=ForceReply(
+                selective=True,
+                input_field_placeholder="مثال: الشيخ أحمد / الحاج محمد / أبو يوسف"
+            ),
+        )
+        return
+
     await update.message.reply_text(
         "السلام عليكم 🌿\n\n"
         "أنا بوت تنظيم جلسة القرآن.\n\n"
-        "داخل المجموعة، اكتب:\n"
-        "/newsession\n\n"
-        "وسأقوم بإنشاء القائمة وتثبيتها في الأعلى 📌"
+        "لإضافة اسمك في الجلسة:\n"
+        "اضغط على زر ➕ أضف اسمي من الرسالة المثبتة في القناة.\n\n"
+        "للمشرف فقط:\n"
+        "/newsession لإنشاء جلسة جديدة\n"
+        "/reset لتصفير القائمة الحالية"
     )
 
 
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    user = update.effective_user
 
-    clear_session(chat_id)
+    if not is_admin(user.id):
+        await update.message.reply_text("عذرًا، هذا الأمر متاح للمشرف فقط.")
+        return
 
-    msg = await update.message.reply_text(
-        build_panel_text(chat_id),
+    clear_session()
+
+    msg = await context.bot.send_message(
+        chat_id=CHANNEL_ID,
+        text=build_panel_text(),
         reply_markup=keyboard(),
         parse_mode="Markdown",
     )
 
-    set_panel_message(chat_id, msg.message_id)
+    set_panel_message(msg.message_id)
 
-    try:
-        await context.bot.pin_chat_message(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            disable_notification=True,
-        )
-    except Exception as e:
-        print("Could not pin message:", e)
-        await update.message.reply_text(
-            "تم إنشاء القائمة ✅\n"
-            "لكن لم أستطع تثبيتها.\n\n"
-            "تأكد أنني Admin ومعي صلاحية Pin Messages."
-        )
+    await pin_panel(context)
+
+    await update.message.reply_text(
+        "تم إنشاء جلسة جديدة بنجاح ✅\n"
+        "تم إرسال القائمة إلى القناة وتثبيتها 📌"
+    )
 
 
 async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    user = update.effective_user
 
-    clear_session(chat_id)
+    if not is_admin(user.id):
+        await update.message.reply_text("عذرًا، هذا الأمر متاح للمشرف فقط.")
+        return
 
-    await refresh_panel(context, chat_id)
-    await pin_panel(context, chat_id)
+    clear_session()
+
+    await refresh_panel(context)
+    await pin_panel(context)
 
     await update.message.reply_text("تم تصفير قائمة الجلسة بنجاح ✅")
 
@@ -371,6 +442,9 @@ async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📌 *طريقة الاستخدام:*\n\n"
+        "للمشاركين:\n"
+        "اضغط ➕ *أضف اسمي* من الرسالة المثبتة في القناة.\n\n"
+        "للمشرف:\n"
         "/newsession لإنشاء جلسة جديدة وتثبيت القائمة\n"
         "/reset لتصفير القائمة الحالية\n"
         "/help لعرض المساعدة\n\n"
@@ -392,89 +466,62 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    chat_id = query.message.chat_id
     user = query.from_user
     user_id = user.id
     fallback_name = telegram_display_name(user)
 
     action = query.data
 
-    if action == "add_name":
-        if user.username:
-            prompt_text = (
-                f"@{user.username}\n"
-                "اكتب اسمك الحقيقي كما تحب أن يظهر في القائمة 👇"
-            )
-        else:
-            prompt_text = "اكتب اسمك الحقيقي كما تحب أن يظهر في القائمة 👇"
-
-        prompt = await query.message.reply_text(
-            prompt_text,
-            reply_markup=ForceReply(
-                selective=True,
-                input_field_placeholder="مثال: الشيخ أحمد / الحاج محمد / أبو يوسف"
-            ),
-        )
-
-        save_pending_name(chat_id, user_id, prompt.message_id)
-
-        await query.answer(
-            "اكتب اسمك في رسالة رد على البوت.",
-            show_alert=True,
-        )
-        return
-
     if action == "delete_name":
-        delete_participant(chat_id, user_id)
-        clear_pending_name(chat_id, user_id)
+        delete_participant(user_id)
+        clear_pending_name(user_id)
 
-        await refresh_panel(context, chat_id)
-        await pin_panel(context, chat_id)
+        await refresh_panel(context)
+        await pin_panel(context)
 
         await query.answer("تم حذف اسمك من القائمة ✅", show_alert=True)
         return
 
     if action == "recited":
-        update_status(chat_id, user_id, fallback_name, "recited")
+        update_status(user_id, fallback_name, "recited")
 
-        await refresh_panel(context, chat_id)
-        await pin_panel(context, chat_id)
+        await refresh_panel(context)
+        await pin_panel(context)
 
         await query.answer("تم تسجيلك: قرأت بالفعل ✅", show_alert=True)
         return
 
     if action == "listener":
-        update_status(chat_id, user_id, fallback_name, "listener")
+        update_status(user_id, fallback_name, "listener")
 
-        await refresh_panel(context, chat_id)
-        await pin_panel(context, chat_id)
+        await refresh_panel(context)
+        await pin_panel(context)
 
         await query.answer("تم تسجيلك: مستمع فقط 🎧", show_alert=True)
         return
 
     if action == "excused":
-        update_status(chat_id, user_id, fallback_name, "excused")
+        update_status(user_id, fallback_name, "excused")
 
-        await refresh_panel(context, chat_id)
-        await pin_panel(context, chat_id)
+        await refresh_panel(context)
+        await pin_panel(context)
 
         await query.answer("تم تسجيلك: معذور 🌸", show_alert=True)
         return
 
 
 # -------------------------
-# Text replies for names
+# Text replies for private name entry
 # -------------------------
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    chat_id = update.effective_chat.id
     user = update.effective_user
     user_id = user.id
 
-    if not has_pending_name(chat_id, user_id):
+    if not has_pending_name(user_id):
         return
 
     name = update.message.text.strip()
@@ -487,15 +534,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الاسم طويل جدًا. من فضلك اكتب اسم أقصر.")
         return
 
-    upsert_participant(chat_id, user_id, name, "waiting")
-    clear_pending_name(chat_id, user_id)
+    upsert_participant(user_id, name, "waiting")
+    clear_pending_name(user_id)
 
-    await refresh_panel(context, chat_id)
-    await pin_panel(context, chat_id)
+    await refresh_panel(context)
+    await pin_panel(context)
 
     await update.message.reply_text(
         f"تم إضافة اسمك بنجاح ✅\n"
-        f"الاسم: {name}"
+        f"الاسم: {name}\n\n"
+        "يمكنك الآن الرجوع إلى القناة ومتابعة القائمة المثبتة 📌"
     )
 
 
@@ -550,10 +598,11 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    print("Quran session bot is starting...")
+    print("Quran private-channel bot is starting...")
+    print(f"Bot username: @{BOT_USERNAME}")
+    print(f"Channel ID: {CHANNEL_ID}")
     print(f"Database file: {DB_FILE}")
     print("Trying to connect to Telegram...")
-    print("If it stays running, the bot is active.")
 
     app.run_polling(
         poll_interval=1,
