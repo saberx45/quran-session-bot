@@ -278,7 +278,7 @@ def status_text(status):
     if status == "listener":
         return "🎧 مستمع فقط"
     if status == "excused":
-        return "🌸 معذور"
+        return "🌸 معتذر/ة"
     return "⏳ في الانتظار"
 
 
@@ -295,7 +295,7 @@ def keyboard():
             InlineKeyboardButton("🎧 مستمع", callback_data="listener"),
         ],
         [
-            InlineKeyboardButton("🌸 معذور", callback_data="excused"),
+            InlineKeyboardButton("🌸 معتذر/ة", callback_data="excused"),
         ],
     ])
 
@@ -312,7 +312,7 @@ def build_panel_text():
     text += "3️⃣ اكتب اسمك الحقيقي كما تحب أن يظهر.\n"
     text += "4️⃣ بعد الانتهاء من القراءة اضغط ✅ *قرأت بالفعل*.\n"
     text += "5️⃣ إذا كنت ستستمع فقط اضغط 🎧 *مستمع*.\n"
-    text += "6️⃣ إذا كنت غير حاضر أو معذور اضغط 🌸 *معذور*.\n\n"
+    text += "6️⃣ إذا كنت غير حاضر أو معتذر/ة اضغط 🌸 *معتذر/ة*.\n\n"
 
     text += "━━━━━━━━━━━━━━\n"
     text += "📋 *القائمة الحالية:*\n\n"
@@ -470,7 +470,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❌ احذف اسمي\n"
         "✅ قرأت بالفعل\n"
         "🎧 مستمع\n"
-        "🌸 معذور",
+        "🌸 معتذر/ة",
         parse_mode="Markdown",
     )
 
@@ -523,7 +523,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await refresh_panel(context)
         await pin_panel(context)
 
-        await query.answer("تم تسجيلك: معذور 🌸", show_alert=True)
+        await query.answer("تم تسجيلك: معتذر/ة 🌸", show_alert=True)
         return
 
 
